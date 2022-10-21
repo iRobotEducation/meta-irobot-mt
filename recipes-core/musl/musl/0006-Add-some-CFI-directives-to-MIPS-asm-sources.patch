@@ -1,0 +1,111 @@
+From 84cfdd63cac7917689cb30805757070b50b9bf19 Mon Sep 17 00:00:00 2001
+From: Daniele Tamino <dtamino@irobot.com>
+Date: Wed, 29 Jan 2020 18:43:22 -0800
+Subject: [PATCH] Add some CFI directives to MIPS asm sources
+
+---
+ src/internal/mips/syscall.s  | 4 ++++
+ src/ldso/mips/dlsym.s        | 6 ++++++
+ src/thread/mips/syscall_cp.s | 9 +++++++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/src/internal/mips/syscall.s b/src/internal/mips/syscall.s
+index 5d0def52..f9bc599d 100644
+--- a/src/internal/mips/syscall.s
++++ b/src/internal/mips/syscall.s
+@@ -4,6 +4,7 @@
+ .hidden __syscall
+ .type   __syscall,@function
+ __syscall:
++    .cfi_startproc
+ 	move    $2, $4
+ 	move    $4, $5
+ 	move    $5, $6
+@@ -13,6 +14,7 @@ __syscall:
+ 	lw      $9, 24($sp)
+ 	lw      $10,28($sp)
+ 	subu    $sp, $sp, 32
++	.cfi_adjust_cfa_offset 32
+ 	sw      $8, 16($sp)
+ 	sw      $9, 20($sp)
+ 	sw      $10,24($sp)
+@@ -21,6 +23,8 @@ __syscall:
+ 	syscall
+ 	beq     $7, $0, 1f
+ 	addu    $sp, $sp, 32
++    .cfi_adjust_cfa_offset -32
+ 	subu    $2, $0, $2
+ 1:	jr      $ra
+ 	nop
++	.cfi_endproc
+diff --git a/src/ldso/mips/dlsym.s b/src/ldso/mips/dlsym.s
+index 1573e519..f1036621 100644
+--- a/src/ldso/mips/dlsym.s
++++ b/src/ldso/mips/dlsym.s
+@@ -3,15 +3,21 @@
+ .hidden __dlsym
+ .type dlsym,@function
+ dlsym:
++    .cfi_startproc
+ 	lui $gp, %hi(_gp_disp)
+ 	addiu $gp, %lo(_gp_disp)
+ 	addu $gp, $gp, $25
+ 	move $6, $ra
+ 	lw $25, %call16(__dlsym)($gp)
+ 	addiu $sp, $sp, -16
++	.cfi_adjust_cfa_offset 16
+ 	sw $ra, 12($sp)
++    .cfi_rel_offset $ra, 12
+ 	jalr $25
+ 	nop
+ 	lw $ra, 12($sp)
++    .cfi_restore $ra
+ 	jr $ra
+ 	addiu $sp, $sp, 16
++	.cfi_adjust_cfa_offset -16
++	.cfi_endproc
+diff --git a/src/thread/mips/syscall_cp.s b/src/thread/mips/syscall_cp.s
+index d2846264..ab173496 100644
+--- a/src/thread/mips/syscall_cp.s
++++ b/src/thread/mips/syscall_cp.s
+@@ -14,9 +14,12 @@
+ .hidden __syscall_cp_asm
+ .type   __syscall_cp_asm,@function
+ __syscall_cp_asm:
++    .cfi_startproc
+ 	subu    $sp, $sp, 32
++	.cfi_adjust_cfa_offset 32
+ __cp_begin:
+ 	lw      $4, 0($4)
++	.cfi_remember_state
+ 	bne     $4, $0, __cp_cancel
+ 	move    $2, $5
+ 	move    $4, $6
+@@ -35,14 +38,18 @@ __cp_begin:
+ __cp_end:
+ 	beq     $7, $0, 1f
+ 	addu    $sp, $sp, 32
++	.cfi_adjust_cfa_offset -32
+ 	subu    $2, $0, $2
+ 1:	jr      $ra
+ 	nop
+ 
+ __cp_cancel:
++    .cfi_restore_state
+ 	move    $2, $ra
++	.cfi_register $ra, $2
+ 	bal     1f
+ 	addu    $sp, $sp, 32
++	.cfi_adjust_cfa_offset -32
+ 	.gpword .
+ 	.gpword __cancel
+ 1:	lw      $3, ($ra)
+@@ -51,3 +58,5 @@ __cp_cancel:
+ 	addu    $25, $25, $3
+ 	jr      $25
+ 	move    $ra, $2
++	.cfi_restore $ra
++	.cfi_endproc
+-- 
+2.24.0
+

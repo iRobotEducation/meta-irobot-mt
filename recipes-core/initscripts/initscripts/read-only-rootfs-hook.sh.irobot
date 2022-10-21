@@ -1,0 +1,94 @@
+#!/bin/sh
+
+ROOTFS_READ_ONLY="yes"
+
+if [ -f /etc/default/rcS ]; then
+  . /etc/default/rcS
+fi
+
+DEV_MODE="disabled"
+# set a default value of SYSTEM_ACCESS.
+# this is needed so that the system is not locked on the first
+# time boot of flash.
+SYSTEM_ACCESS=unlocked
+# pull in the provisioning variables into this environment.
+# this may over ride DEV_MODE and SYSTEM_ACCESS.
+# use the persistent file location as /opt/irobot/config has not yet been mounted.
+PROVISION_FILE=/data/overlay/upper/opt/irobot/config/provisioning
+if [ -r ${PROVISION_FILE} ] ; then
+    . ${PROVISION_FILE}
+fi
+
+[ "$ROOTFS_READ_ONLY" = "no" ] && exit 0
+
+is_on_read_only_partition () {
+  DIRECTORY=$1
+  dir=`readlink -f $DIRECTORY`
+  while true; do
+    if [ ! -d "$dir" ]; then
+      echo "ERROR: $dir is not a directory"
+      exit 1
+    else
+      for flag in `awk -v dir=$dir '{ if ($2 == dir) { print "FOUND"; split($4,FLAGS,",") } }; \
+        END { for (f in FLAGS) print FLAGS[f] }' < /proc/mounts`; do
+        [ "$flag" = "FOUND" ] && partition="read-write"
+        [ "$flag" = "ro" ] && { partition="read-only"; break; }
+      done
+      if [ "$dir" = "/" -o -n "$partition" ]; then
+        break
+      else
+        dir=`dirname $dir`
+      fi
+    fi
+  done
+  [ "$partition" = "read-only" ] && echo "yes" || echo "no"
+}
+
+if [ "$1" = "start" ] ; then
+  if [ "$DEV_MODE" == "enabled"  ] ; then
+    # check for /dev/mmcblk0p1, may take some time to appear
+    COUNT=0
+    while ! [ -r /dev/mmcblk0p1 ]
+    do
+      sleep 0.5
+      COUNT=$(($COUNT+1))
+      if [ $COUNT -gt 6 ]; then
+        # timed out
+        break
+      fi
+    done
+
+    if [ -r /dev/mmcblk0p1 ]; then
+      # external storage exists.
+      # unmount external storage if already mounted
+      umount /data > /dev/null 2>&1
+      # use external storage for /data
+      mount -t ext4 -o sync /dev/mmcblk0p1 /data > /dev/null 2>&1
+      mount | grep -q mmcblk0p1
+      if [ $? -ne 0 ]; then
+        # the external storage did not mount
+        # use the ubi volume for /data
+        mount -t ubifs ubi0:persistent /data > /dev/null 2>&1
+      fi
+    else
+      # use the ubi volume for /data
+      mount -o exec -t ubifs ubi0:persistent /data > /dev/null 2>&1
+    fi
+  else
+    # use the ubi volume for /data
+    if  [ -n "${SYSTEM_ACCESS}" ] && [ "${SYSTEM_ACCESS}" == "unlocked" ] || [ "${SYSTEM_ACCESS}" == "beta" ]  ; then
+      # system is unlocked, mount /data with exec enabled
+      mount -o exec -t ubifs ubi0:persistent /data > /dev/null 2>&1
+    else
+      # system is locked, mount /data with exec disabled
+      mount -o noexec -t ubifs ubi0:persistent /data > /dev/null 2>&1
+    fi
+  fi
+
+  if [ `is_on_read_only_partition /var/lib` = "yes" ]; then
+    grep -q "tmpfs /var/volatile" /proc/mounts || mount /var/volatile
+    # setup persistent files
+    /usr/bin/persistent_setup.sh
+  fi
+fi
+exit 0

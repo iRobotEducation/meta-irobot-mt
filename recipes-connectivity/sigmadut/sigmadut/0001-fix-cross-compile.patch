@@ -1,0 +1,14 @@
+diff -urN a/Makefile.inc b/Makefile.inc
+--- a/Makefile.inc	2019-09-30 10:11:52.391953281 -0400
++++ b/Makefile.inc	2019-09-30 10:12:14.303696400 -0400
+@@ -13,8 +13,8 @@
+ # NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE
+ # USE OR PERFORMANCE OF THIS SOFTWARE.
+ #
+-CROSS_COMPILE = mipsel-linux-
+-CC = $(CROSS_COMPILE)gcc
++CROSS_COMPILE ?= mipsel-linux-
++CC ?= $(CROSS_COMPILE)gcc
+ LIB=lib
+ DUT=dut
+ CA=ca

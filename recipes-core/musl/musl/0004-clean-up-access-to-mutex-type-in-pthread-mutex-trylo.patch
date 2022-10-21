@@ -1,0 +1,37 @@
+From 7506b97297d58463072f46e14b77da614c9429d8 Mon Sep 17 00:00:00 2001
+From: OpenEmbedded <oe.patch@oe>
+Date: Mon, 26 Aug 2019 17:28:38 +0000
+Subject: [PATCH] clean up access to mutex type in pthread_mutex_trylock there
+ was no point in masking off the pshared bit when first loading the type,
+ since every subsequent access involves a mask anyway. not masking it may
+ avoid a subsequent load to check the pshared flag, and it's just simpler.
+ Diffstat (limited to 'src/thread/pthread_mutex_trylock.c')
+
+1 files changed, 2 insertions, 2 deletions
+
+---
+ src/thread/pthread_mutex_trylock.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/thread/pthread_mutex_trylock.c b/src/thread/pthread_mutex_trylock.c
+index 3fe5912..29622ff 100644
+--- a/src/thread/pthread_mutex_trylock.c
++++ b/src/thread/pthread_mutex_trylock.c
+@@ -3,7 +3,7 @@
+ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
+ {
+ 	int old, own;
+-	int type = m->_m_type & 15;
++	int type = m->_m_type;
+ 	pthread_t self = __pthread_self();
+ 	int tid = self->tid;
+ 
+@@ -17,7 +17,7 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
+ 	if (own == 0x3fffffff) return ENOTRECOVERABLE;
+ 	if (own || (old && !(type & 4))) return EBUSY;
+ 
+-	if (m->_m_type & 128) {
++	if (type & 128) {
+ 		if (!self->robust_list.off) {
+ 			self->robust_list.off = (char*)&m->_m_lock-(char *)&m->_m_next;
+ 			__syscall(SYS_set_robust_list, &self->robust_list, 3*sizeof(long));

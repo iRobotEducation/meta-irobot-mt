@@ -1,0 +1,92 @@
+software =
+{
+    version = "@@ROBOT@@+@@IROBOT_PRODUCT_VERSION@@";
+    description = "Firmware update for Daredevil";
+    iRobot-userdata = "0";
+    hardware-compatibility: ["1.0", "1.1"];
+
+    sundial:
+            {
+                hardware-compatibility: ["1.0"];
+                scripts: (
+                         {
+                             filename = "swupdate-install.sh";
+                             type = "shellscript";
+                             data = "@@ROBOT@@+@@IROBOT_PRODUCT_VERSION@@";
+                             sha256sum = "@swupdate-install.sh"
+                         }
+                );
+
+                images: (
+                        {
+                            filename = "fitImage";
+                            type = "rawfile";
+                            path = "/tmp/fitImage";
+                            sha256sum = "@fitImage"
+                        },
+                        {
+                            filename = "base-image-@@MACHINE@@.squashfs-xz";
+                            type = "rawfile";
+                            path = "/tmp/base-image-@@MACHINE@@.squashfs-xz";
+                            sha256sum = "@base-image-@@MACHINE@@.squashfs-xz"
+                        },
+                );
+
+            }
+
+     sundial-1:
+            {
+                hardware-compatibility: ["1.1"];
+                scripts: (
+                         {
+                             filename = "swupdate-install.sh";
+                             type = "shellscript";
+                             data = "@@ROBOT@@+@@IROBOT_PRODUCT_VERSION@@";
+                             sha256sum = "@swupdate-install.sh"
+                         }
+                );
+
+                images: (
+                         {
+                             filename = "fitImage";
+                             volume = "new_kernel"
+                             ubipartition = "mtd5"
+                             type = "ubivol";
+                             installed-directly = true;
+                             sha256sum = "@fitImage";
+                             properties: {
+                                 auto-resize = "true";
+                             }
+                         },
+                         {
+                             filename = "base-image-@@MACHINE@@.squashfs-xz";
+                             volume = "new_rootfs"
+                             ubipartition = "mtd5"
+                             type = "ubivol";
+                             installed-directly = true;
+                             sha256sum = "@base-image-@@MACHINE@@.squashfs-xz";
+                             properties: {
+                                 auto-resize = "true";
+                             }
+                         },
+                );
+
+                /* partitions tag is used to resize UBI partitions */
+                partitions: ( /* UBI Volumes */
+                        {
+                            name = "new_rootfs";
+                            size = @@BASE_IMAGE_SIZE@@;
+                            device = "mtd5";
+                            data = "static";
+                        },
+                        {
+                            name = "new_kernel";
+                            size = @@FIT_IMAGE_SIZE@@;
+                            device = "mtd5";
+                            data = "static";
+                        },
+                );
+
+            }
+
+}

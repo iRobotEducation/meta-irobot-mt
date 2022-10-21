@@ -1,0 +1,12 @@
+diff -urN a/lib/wfa_cs.c b/lib/wfa_cs.c
+--- a/lib/wfa_cs.c	2019-09-30 11:20:04.920444791 -0400
++++ b/lib/wfa_cs.c	2019-09-30 11:20:56.179852912 -0400
+@@ -456,7 +456,7 @@
+     /*
+      * check a script file (the current implementation specific)
+      */
+-    ret = access("/sbin/getipconfig.sh", F_OK);
++    ret = access("/usr/sbin/getipconfig.sh", F_OK);
+     if(ret == -1)
+     {
+         ipconfigResp->status = STATUS_ERROR;

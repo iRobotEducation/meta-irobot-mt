@@ -1,0 +1,89 @@
+From dda969a8f66c8f645257eaa2a66194ed5d804844 Mon Sep 17 00:00:00 2001
+From: Maria Rios-Martinez <mriosmartinez@irobot.com>
+Date: Tue, 9 Jun 2020 16:45:58 -0400
+Subject: [PATCH] Add support for --quiet command line option
+
+For parsing output of certain commands, use --quiet
+option to avoid printing banner, license, and HW revision.
+---
+ core/swupdate.c | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/core/swupdate.c b/core/swupdate.c
+index 69fbf7e..143744c 100644
+--- a/core/swupdate.c
++++ b/core/swupdate.c
+@@ -110,6 +110,7 @@ static struct option long_options[] = {
+ #endif
+ 	{"check", no_argument, NULL, 'c'},
+ 	{"postupdate", required_argument, NULL, 'p'},
++	{"quiet", no_argument, NULL, 'q'},
+ 	{NULL, 0, NULL, 0}
+ };
+ 
+@@ -130,6 +131,7 @@ static void usage(char *programname)
+ 		"                                  Ex.: stable,main\n"
+ 		" -i, --image <filename>         : Software to be installed\n"
+ 		"     --query=<attribute>        : query information from sw-description file\n"
++		"     --quiet                    : suppress some output\n"
+ 		" -l, --loglevel <level>         : logging level\n"
+ 		" -L, --syslog                   : enable syslog logger\n"
+ #ifdef CONFIG_SIGNED_IMAGES
+@@ -626,6 +628,7 @@ int main(int argc, char **argv)
+ 	int opt_i = 0;
+ 	int opt_e = 0;
+ 	int opt_c = 0;
++	int opt_q = 0;
+ 	int opt_Q = 0;
+ 	char image_url[MAX_URL];
+ 	char main_options[256];
+@@ -738,9 +741,6 @@ int main(int argc, char **argv)
+ 		}
+ 	}
+ 
+-	printf("%s\n", BANNER);
+-	printf("Licensed under GPLv2. See source distribution for detailed "
+-		"copyright notices.\n\n");
+ 
+ 	/*
+ 	 * Command line should be parsed a second time
+@@ -864,6 +864,9 @@ int main(int argc, char **argv)
+ 			strncpy(swcfg.globals.postupdatecmd, optarg,
+ 				sizeof(swcfg.globals.postupdatecmd));
+ 			break;
++		case 'q':
++			opt_q =1;
++			break;
+ 		case 'Q':
+ 			opt_Q = 1;
+ 			strncpy(attributes, optarg, sizeof(attributes));
+@@ -875,6 +878,12 @@ int main(int argc, char **argv)
+ 		}
+ 	}
+ 
++	if (!opt_q) {
++		printf("%s\n", BANNER);
++		printf("Licensed under GPLv2. See source distribution for detailed "
++		"copyright notices.\n\n");
++	}
++
+ 	if (optind < argc) {
+ 		/* SWUpdate has no non-option arguments, fail on them */
+ 		usage(argv[0]);
+@@ -1002,10 +1011,11 @@ int main(int argc, char **argv)
+ 
+ 	lua_handlers_init();
+ 
+-	if(!get_hw_revision(&swcfg.hw))
++	if(!get_hw_revision(&swcfg.hw) && !opt_q)
+ 		printf("Running on %s Revision %s\n", swcfg.hw.boardname, swcfg.hw.revision);
+ 
+-	print_registered_handlers();
++	if (!opt_q) 
++		print_registered_handlers();
+ 
+ 	if (swcfg.globals.syslog_enabled) {
+ 		if (syslog_init()) {
+-- 
+2.24.1
+

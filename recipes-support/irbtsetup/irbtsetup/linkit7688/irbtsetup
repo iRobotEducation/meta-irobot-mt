@@ -1,0 +1,54 @@
+#!/bin/sh
+
+NAME=irbtsetup
+set -e
+
+case "$1" in
+    start)
+        # set gpio 11 low to enable the buffer chip that controls
+        # the signals for uart0/uart1/spi/is2 signals
+        gpio -p 11 -s 0
+        if [ -f /usr/bin/amixer ]; then
+          # setup the sound system
+          amixer -c 0 set "Right Output Mixer PCM" on > /dev/null 2>&1
+          amixer -c 0 set "Left Output Mixer PCM" on  > /dev/null 2>&1
+          amixer -c 0 set "DAC Mono Mix" Mono  > /dev/null 2>&1
+          amixer -c 0 set "Speaker" 100%  > /dev/null 2>&1
+          amixer -c 0 set "Headphone" 100%  > /dev/null 2>&1
+        fi
+	if [ ! -f /opt/irobot/config/provisioning ]; then
+	  # default provisioning not found, run the provision command
+	  provision -s
+	fi
+        ;;
+    stop)
+        # set gpio 11 high to disable the buffer chip that controls
+        # the signals for uart0/uart1/spi/is2 signals
+        gpio -p 11 -s 1
+        if [ -f /usr/bin/amixer ]; then
+          # disable the sound system
+          amixer -c 0 set "Right Output Mixer PCM" off  > /dev/null 2>&1
+          amixer -c 0 set "Left Output Mixer PCM" off  > /dev/null 2>&1
+          amixer -c 0 set "Speaker" 0%  > /dev/null 2>&1
+          amixer -c 0 set "Headphone" 0%  > /dev/null 2>&1
+        fi
+        echo -n "stopping $NAME... "
+        echo "done."
+        ;;
+    restart)
+        echo "restarting $NAME... "
+        $0 stop
+        $0 start
+        echo "done."
+        ;;
+    reload)
+        echo -n "reloading $NAME... "
+        echo "done."
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|reload}"
+        exit 1
+        ;;
+esac
+
+exit 0

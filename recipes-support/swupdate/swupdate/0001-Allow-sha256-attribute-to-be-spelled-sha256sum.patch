@@ -1,0 +1,38 @@
+From df7f93134fc957feb9612bca21805e0f65fdd617 Mon Sep 17 00:00:00 2001
+From: Patrick Doyle <pdoyle@irobot.com>
+Date: Wed, 8 Apr 2020 09:40:42 -0400
+Subject: [PATCH] Allow sha256 attribute to be spelled "sha256sum".
+
+This is a stopgap measure implemented in order to allow signed updates
+to be installed on devices with older versions of swupdate.  By design,
+older versions of swupdate, which do not have CONFIG_SIGNED_IMAGES
+enabled, will refuse to install an update with a "sha256" attribute for
+an image or script.  In order to work around this for newer versions of
+swupdate, we allow the sha256 checksum to be specified with a
+"sha256sum" attribute, which is ignored by older versions of swupdate.
+
+Signed-off-by: Patrick Doyle <pdoyle@irobot.com>
+---
+ corelib/parsing_library.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/corelib/parsing_library.c b/corelib/parsing_library.c
+index 009cd2a..878b62c 100644
+--- a/corelib/parsing_library.c
++++ b/corelib/parsing_library.c
+@@ -191,7 +191,11 @@ void get_hash_value(parsertype p, void *elem, unsigned char *hash)
+ 	char hash_ascii[80];
+ 
+ 	memset(hash_ascii, 0, sizeof(hash_ascii));
+-	GET_FIELD_STRING(p, elem, "sha256", hash_ascii);
++        if (exist_field_string(p, elem, "sha256")) {
++            GET_FIELD_STRING(p, elem, "sha256", hash_ascii);
++        } else if (exist_field_string(p, elem, "sha256sum")) {
++            GET_FIELD_STRING(p, elem, "sha256sum", hash_ascii);
++        }
+ 
+ 	ascii_to_hash(hash, hash_ascii);
+ }
+-- 
+2.24.1
+

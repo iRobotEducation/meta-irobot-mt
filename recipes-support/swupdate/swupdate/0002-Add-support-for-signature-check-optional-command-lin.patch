@@ -1,0 +1,298 @@
+From c62ae0bdceacbe2eaceb1bb08a2157c19d22ef31 Mon Sep 17 00:00:00 2001
+From: Patrick Doyle <pdoyle@irobot.com>
+Date: Wed, 8 Apr 2020 13:50:27 -0400
+Subject: [PATCH] Add support for --signature-check-optional command line
+ option.
+
+In order to deploy software to development systems, it can be useful to
+deploy code that has not yet been "production signed".  Teach swupdate
+to install images when the signature doesn't match what was expected.
+
+Signed-off-by: Patrick Doyle <pdoyle@irobot.com>
+---
+ core/cpio_utils.c             | 19 ++++++++++++++-----
+ core/parser.c                 |  5 +++--
+ core/swupdate.c               | 17 ++++++++++++-----
+ corelib/stream_interface.c    |  2 +-
+ corelib/swupdate_rsa_verify.c | 27 +++++++++++++++++++--------
+ include/parsers.h             |  2 +-
+ include/sslapi.h              |  5 +++--
+ include/util.h                |  2 +-
+ 8 files changed, 54 insertions(+), 25 deletions(-)
+
+diff --git a/core/cpio_utils.c b/core/cpio_utils.c
+index 143474b..97a4821 100644
+--- a/core/cpio_utils.c
++++ b/core/cpio_utils.c
+@@ -536,7 +536,7 @@ int extract_cpio_header(int fd, struct filehdr *fhdr, unsigned long *offset)
+ 	return 0;
+ }
+ 
+-int extract_sw_description(int fd, const char *descfile, off_t *offs)
++int extract_sw_description(int fd, const char *descfile, off_t *offs, int signature_check_optional)
+ {
+ 	struct filehdr fdh;
+ 	unsigned long offset = *offs;
+@@ -551,10 +551,19 @@ int extract_sw_description(int fd, const char *descfile, off_t *offs)
+ 	}
+ 
+ 	if (strcmp(fdh.filename, descfile)) {
+-		ERROR("Expected %s but found %s.",
+-			descfile,
+-			fdh.filename);
+-		return -1;
++		if (signature_check_optional) {
++			WARN("Expected %s but found %s.",
++			     descfile,
++			     fdh.filename);
++			// Pretend like we didn't try to read the sw description
++			lseek(fd, *offs, SEEK_SET);
++			return 0;
++		} else {
++			ERROR("Expected %s but found %s.",
++			      descfile,
++			      fdh.filename);
++			return -1;
++		}
+ 	}
+ 	if ((strlen(TMPDIR) + strlen(fdh.filename)) > sizeof(output_file)) {
+ 		ERROR("File Name too long : %s", fdh.filename);
+diff --git a/core/parser.c b/core/parser.c
+index 313201f..cab818b 100644
+--- a/core/parser.c
++++ b/core/parser.c
+@@ -175,7 +175,7 @@ static void remove_installed_image_list(struct imglist *img_list,
+ 	}
+ }
+ 
+-int parse(struct swupdate_cfg *sw, const char *descfile)
++int parse(struct swupdate_cfg *sw, const char *descfile, int signature_check_optional)
+ {
+ 	int ret = -1;
+ 	parser_fn current;
+@@ -189,7 +189,8 @@ int parse(struct swupdate_cfg *sw, const char *descfile)
+ 	strcat(sigfile, ".sig");
+ 
+ 	ret = swupdate_verify_file(sw->dgst, sigfile, descfile,
+-				   sw->globals.forced_signer_name);
++				   sw->globals.forced_signer_name,
++				   signature_check_optional);
+ 	free(sigfile);
+ 
+ 	if (ret)
+diff --git a/core/swupdate.c b/core/swupdate.c
+index 476358b..770f819 100644
+--- a/core/swupdate.c
++++ b/core/swupdate.c
+@@ -85,6 +85,7 @@ static struct option long_options[] = {
+ 	{"ca-path", required_argument, NULL, 'k'},
+ 	{"cert-purpose", required_argument, NULL, '1'},
+ 	{"forced-signer-name", required_argument, NULL, '2'},
++	{"signature-check-optional", no_argument, NULL, '3'},
+ #endif
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 	{"key-aes", required_argument, NULL, 'K'},
+@@ -134,6 +135,7 @@ static void usage(char *programname)
+ 		"                                  [emailProtection|codeSigning] (default: emailProtection)\n"
+ 		"     --forced-signer-name <cn>  : set expected common name of signer certificate\n"
+ 		"     --ca-path                  : path to the Certificate Authority (PEM)\n"
++		"     --signature-check-optional : Install image even if signature check fails\n"
+ #endif
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 		" -K, --key-aes <key file>       : the file contains the symmetric key to be used\n"
+@@ -288,7 +290,7 @@ static int searching_for_image(char *name)
+ 	return fd;
+ }
+ 
+-static int install_from_file(char *fname, int check)
++static int install_from_file(char *fname, int check, int signature_check_optional)
+ {
+ 	int fdsw;
+ 	off_t pos;
+@@ -310,10 +312,10 @@ static int install_from_file(char *fname, int check)
+ 	}
+ 
+ 	pos = 0;
+-	ret = extract_sw_description(fdsw, SW_DESCRIPTION_FILENAME, &pos);
++	ret = extract_sw_description(fdsw, SW_DESCRIPTION_FILENAME, &pos, 0);
+ #ifdef CONFIG_SIGNED_IMAGES
+ 	ret |= extract_sw_description(fdsw, SW_DESCRIPTION_FILENAME ".sig",
+-		&pos);
++		&pos, signature_check_optional);
+ #endif
+ 	/*
+ 	 * Check if files could be extracted
+@@ -325,7 +327,7 @@ static int install_from_file(char *fname, int check)
+ 
+ 	char* swdescfilename = alloca(strlen(get_tmpdir())+strlen(SW_DESCRIPTION_FILENAME)+1);
+ 	sprintf(swdescfilename, "%s%s", get_tmpdir(), SW_DESCRIPTION_FILENAME);
+-	ret = parse(&swcfg, swdescfilename);
++	ret = parse(&swcfg, swdescfilename, signature_check_optional);
+ 	if (ret) {
+ 		ERROR("failed to parse " SW_DESCRIPTION_FILENAME "!");
+ 		exit(EXIT_FAILURE);
+@@ -578,6 +580,7 @@ int main(int argc, char **argv)
+ 	char image_url[MAX_URL];
+ 	char main_options[256];
+ 	unsigned int public_key_mandatory = 0;
++	unsigned int signature_check_optional = 1;
+ 	struct sigaction sa;
+ 	int result = EXIT_SUCCESS;
+ #ifdef CONFIG_SURICATTA
+@@ -623,6 +626,7 @@ int main(int argc, char **argv)
+ #ifdef CONFIG_SIGNED_IMAGES
+ 	strcat(main_options, "k:");
+ 	public_key_mandatory = 1;
++	signature_check_optional = 0;
+ #endif
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 	strcat(main_options, "K:");
+@@ -738,6 +742,9 @@ int main(int argc, char **argv)
+ 			strncpy(swcfg.globals.forced_signer_name, optarg,
+ 				sizeof(swcfg.globals.forced_signer_name));
+ 			break;
++		case '3':
++			signature_check_optional = 1;
++			break;
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 		case 'K':
+ 			strncpy(swcfg.globals.aeskeyfname,
+@@ -966,7 +973,7 @@ int main(int argc, char **argv)
+ 
+ 	if (opt_i) {
+ 
+-		result = install_from_file(fname, opt_c);
++		result = install_from_file(fname, opt_c, signature_check_optional);
+ 		switch (result) {
+ 		case EXIT_FAILURE:
+ 			bootloader_env_set(BOOTVAR_TRANSACTION, "failed");
+diff --git a/corelib/stream_interface.c b/corelib/stream_interface.c
+index 8a07761..068fa37 100644
+--- a/corelib/stream_interface.c
++++ b/corelib/stream_interface.c
+@@ -153,7 +153,7 @@ static int extract_files(int fd, struct swupdate_cfg *software)
+ 				return -1;
+ #endif
+ 			snprintf(output_file, sizeof(output_file), "%s%s", TMPDIR, SW_DESCRIPTION_FILENAME);
+-			if (parse(software, output_file)) {
++			if (parse(software, output_file, 0)) {
+ 				ERROR("Compatible SW not found");
+ 				return -1;
+ 			}
+diff --git a/corelib/swupdate_rsa_verify.c b/corelib/swupdate_rsa_verify.c
+index 6231a70..01d2ea2 100644
+--- a/corelib/swupdate_rsa_verify.c
++++ b/corelib/swupdate_rsa_verify.c
+@@ -75,7 +75,8 @@ static int verify_update(struct swupdate_digest *dgst, char *msg, unsigned int m
+ 	return 0;
+ }
+ 
+-static int verify_final(struct swupdate_digest *dgst, unsigned char *sig, unsigned int slen)
++static int verify_final(struct swupdate_digest *dgst, unsigned char *sig, unsigned int slen,
++		int signature_check_optional)
+ {
+ 	unsigned int rc;
+ 
+@@ -83,15 +84,21 @@ static int verify_final(struct swupdate_digest *dgst, unsigned char *sig, unsign
+ 	ERR_clear_error();
+ 	rc = EVP_DigestVerifyFinal(dgst->ctx, sig, slen);
+ 	if(rc != 1) {
+-		ERROR("EVP_DigestVerifyFinal failed, error 0x%lx %d", ERR_get_error(), rc);
+-		return -1;
++		if (signature_check_optional) {
++			WARN("EVP_DigestVerifyFinal failed, error 0x%lx %d", ERR_get_error(), rc);
++			return 1;
++		} else {
++			ERROR("EVP_DigestVerifyFinal failed, error 0x%lx %d", ERR_get_error(), rc);
++			return -1;
++		}
+ 	}
+ 
+ 	return rc;
+ }
+ 
+ int swupdate_verify_file(struct swupdate_digest *dgst, const char *sigfile,
+-		const char *file, const char *signer_name)
++		const char *file, const char *signer_name,
++		int signature_check_optional)
+ {
+ 	FILE *fp = NULL;
+ 	BIO *sigbio;
+@@ -124,8 +131,12 @@ int swupdate_verify_file(struct swupdate_digest *dgst, const char *sigfile,
+ 	BIO_free(sigbio);
+ 
+ 	if(siglen <= 0) {
+-		ERROR("Error reading signature file %s", sigfile);
+-		status = -ENOKEY;
++		if (signature_check_optional) {
++			WARN("Error reading signature file %s", sigfile);
++		} else {
++			ERROR("Error reading signature file %s", sigfile);
++			status = -ENOKEY;
++		}
+ 		goto out;
+ 	}
+ 
+@@ -154,9 +165,9 @@ int swupdate_verify_file(struct swupdate_digest *dgst, const char *sigfile,
+ 	}
+ 
+ 	TRACE("Verify signed image: Read %d bytes", size);
+-	i = verify_final(dgst, sigbuf, (unsigned int)siglen);
++	i = verify_final(dgst, sigbuf, (unsigned int)siglen, signature_check_optional);
+ 	if(i > 0) {
+-		TRACE("Verified OK");
++		TRACE("Verified OK%s", signature_check_optional ? " (signature check optional)" : "");
+ 		status = 0;
+ 	} else if(i == 0) {
+ 		TRACE("Verification Failure");
+diff --git a/include/parsers.h b/include/parsers.h
+index 598ad92..0e830ec 100644
+--- a/include/parsers.h
++++ b/include/parsers.h
+@@ -18,7 +18,7 @@
+ 
+ typedef int (*parser_fn)(struct swupdate_cfg *swcfg, const char *filename);
+ 
+-int parse(struct swupdate_cfg *swcfg, const char *filename);
++int parse(struct swupdate_cfg *swcfg, const char *filename, int signature_check_optional);
+ int parse_cfg (struct swupdate_cfg *swcfg, const char *filename);
+ int parse_json(struct swupdate_cfg *swcfg, const char *filename);
+ int parse_external(struct swupdate_cfg *swcfg, const char *filename);
+diff --git a/include/sslapi.h b/include/sslapi.h
+index 6f03ece..3048f73 100644
+--- a/include/sslapi.h
++++ b/include/sslapi.h
+@@ -109,14 +109,15 @@ int swupdate_HASH_final(struct swupdate_digest *dgst, unsigned char *md_value,
+ 	       			unsigned int *md_len);
+ void swupdate_HASH_cleanup(struct swupdate_digest *dgst);
+ int swupdate_verify_file(struct swupdate_digest *dgst, const char *sigfile,
+-				const char *file, const char *signer_name);
++				const char *file, const char *signer_name,
++				int signature_check_optional);
+ int swupdate_HASH_compare(unsigned char *hash1, unsigned char *hash2);
+ 
+ 
+ #else
+ #define swupdate_dgst_init(sw, keyfile) ( 0 )
+ #define swupdate_HASH_init(p) ( NULL )
+-#define swupdate_verify_file(dgst, sigfile, file) ( 0 )
++#define swupdate_verify_file(dgst, sigfile, file, signer_name, signature_check_optional) ( 0 )
+ #define swupdate_HASH_update(p, buf, len)	(-1)
+ #define swupdate_HASH_final(p, result, len)	(-1)
+ #define swupdate_HASH_cleanup(sw)
+diff --git a/include/util.h b/include/util.h
+index 445e9f2..d9181fa 100644
+--- a/include/util.h
++++ b/include/util.h
+@@ -167,7 +167,7 @@ int copyfile(int fdin, void *out, unsigned int nbytes, unsigned long *offs,
+ 	int skip_file, int compressed, uint32_t *checksum,
+ 	unsigned char *hash, int encrypted, writeimage callback);
+ int copyimage(void *out, struct img_type *img, writeimage callback);
+-int extract_sw_description(int fd, const char *descfile, off_t *offs);
++int extract_sw_description(int fd, const char *descfile, off_t *offs, int signature_check_optional);
+ off_t extract_next_file(int fd, int fdout, off_t start, int compressed,
+ 			int encrypted, unsigned char *hash);
+ int openfileoutput(const char *filename);
+-- 
+2.24.1
+

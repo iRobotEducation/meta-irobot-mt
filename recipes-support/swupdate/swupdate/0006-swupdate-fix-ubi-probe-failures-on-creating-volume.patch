@@ -1,0 +1,46 @@
+From 5e20669f5ee14f9c785b9f2ec7240302cda20d9d Mon Sep 17 00:00:00 2001
+From: Devang Panchal <dpanchal@irobot.com>
+Date: Tue, 9 Mar 2021 09:16:26 -0500
+Subject: [PATCH] swupdate: fix ubi probe failures on creating volume
+
+LINCON-354: swupdate is getting fail in ubi volume probe after creating
+ubi volume. ubi volume creation is taking some time and it's required
+some delay before update images.
+
+ - add 5 retries to probe ubi volume with 1 second sleep.
+---
+ handlers/ubivol_handler.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/handlers/ubivol_handler.c b/handlers/ubivol_handler.c
+index 805e610..ad066aa 100644
+--- a/handlers/ubivol_handler.c
++++ b/handlers/ubivol_handler.c
+@@ -80,7 +80,23 @@ static int update_volume(libubi_t libubi, struct img_type *img,
+ 		vol->dev_num,
+ 		vol->vol_id);
+ 
+-	err = ubi_probe_node(libubi, node);
++	int probe_retries = 5;
++
++	while(probe_retries--) {
++
++		err = ubi_probe_node(libubi, node);
++		if (err < 0) {
++			if (errno != ENODEV) {
++				ERROR("error while probing %s retrying", node);
++				sleep(1);
++			}
++		}
++		else {
++			snprintf(sbuf, sizeof(sbuf), "probe successful of ubi device %s",node);
++			notify(RUN, RECOVERY_NO_ERROR, INFOLEVEL, sbuf);
++			break;
++		}
++	}
+ 
+ 	if (err == 1) {
+ 		ERROR("\"%s\" is an UBI device node, not an UBI volume node",
+-- 
+2.27.0
+

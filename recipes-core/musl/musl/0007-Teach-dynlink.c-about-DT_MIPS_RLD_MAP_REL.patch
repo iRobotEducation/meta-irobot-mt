@@ -1,0 +1,46 @@
+From 26172a25aec6434f78a1ac21d5587dc8192e6ba6 Mon Sep 17 00:00:00 2001
+From: Patrick Doyle <pdoyle@irobot.com>
+Date: Thu, 20 Feb 2020 17:03:30 -0500
+Subject: [PATCH] Teach dynlink.c about DT_MIPS_RLD_MAP_REL
+
+Record the address of the debug structure in a location indicated by
+DT_MIPS_RLD_MAP_REL so that debuggers can properly debug core files with
+dynamic libraries.
+
+See https://binutils.sourceware.narkive.com/aTb1ofXN/patch-mips-support-shared-library-debug-with-mips-pie
+for the definition of DT_MIPS_RLD_MAP_REL.
+---
+ ldso/dynlink.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+index 6325d8eb..842e7b34 100644
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1866,6 +1866,23 @@ _Noreturn void __dls3(size_t *sp)
+ 			size_t *ptr = (size_t *) app.dynv[i+1];
+ 			*ptr = (size_t)&debug;
+ 		}
++		/* According to
++		 * https://binutils.sourceware.narkive.com/aTb1ofXN/patch-mips-support-shared-library-debug-with-mips-pie
++		 * The definition of DT_MIPS_RLD_MAP_REL is:
++		 *
++		 * This member is used by debugging. It contains a relative offset from the tag's runtime
++		 * location of a 32-bit word in the .data section which is supplied by the compilation
++		 * environment. The word's contents are not specified and programs using this value are not
++		 * ABI - compliant.
++		 *
++		 * We need to supply the address of the `debug` structure, relative to the address of the
++		 * DT_MIPS_RLD_MAP_REL tag, in order for gdb to successfully load the share libraries
++		 * referenced by a core file.
++		 */
++		if (app.dynv[i]==DT_MIPS_RLD_MAP_REL) {
++			void **ptr = (void **)((char *)&app.dynv[i] + (unsigned)app.dynv[i+1]);
++			*ptr = &debug;
++		}
+ 	}
+ 
+ 	/* This must be done before final relocations, since it calls
+-- 
+2.24.1
+

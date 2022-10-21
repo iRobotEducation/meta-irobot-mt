@@ -1,0 +1,105 @@
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:          swupdate
+# Required-Start:    $local_fs
+# Should-Start:
+# Required-Stop:     $local_fs
+# Should-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start swupdate application
+### END INIT INFO
+
+#####
+# This file replaces the meta-swupdate/recipes-support/swupdate/swupdate/swupdate
+# file that would normally be installed by swupdate_%.bb.  We do something
+# completely different.  Instead of starting a web server through which the
+# swupdate daemon could accept updates, we (possibly) run swupdate once, at
+# startup, to install an image found on an attached USB disk, assuming that
+# the image passes various ad hoc validation checks.
+#####
+
+# The definition of actions: (From LSB 3.1.0)
+# start         start the service
+# stop          stop the service
+# restart       stop and restart the service if the service is already running,
+#               otherwise start the service
+# try-restart	restart the service if the service is already running
+# reload	cause the configuration of the service to be reloaded without
+#               actually stopping and restarting the service
+# force-reload	cause the configuration to be reloaded if the service supports
+#               this, otherwise restart the service if it is running
+# status	print the current status of the service
+
+# The start, stop, restart, force-reload, and status actions shall be supported
+# by all init scripts; the reload and the try-restart actions are optional
+#
+# We silently ignore the stop, restart, and force-reload actions.
+# We spew a descriptive message for the status action.
+
+
+# PATH should only include /usr/* if it runs after the mountnfs.sh script
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+DESC="swupdate"
+NAME="swupdate"
+DAEMON=/usr/bin/swupdate
+PIDFILE=/var/run/$NAME.pid
+
+. /etc/init.d/functions || exit 1
+
+# Exit if the package is not installed
+[ -x "$DAEMON" ] || exit 0
+
+# Read configuration variable file if it is present
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+#
+# Function that starts the service
+#
+# Check to see if a (single) .swu file is available on a USB mounted
+# filesystem (assumed/required to be mounted on /run/media/sda1)
+# And then, attempt to swupdate the specified .swu image, but only
+# updating if the version in the image differs from the installed
+# version.
+
+do_start() {
+	[ $(ls /run/media/sda1/*.swu 2> /dev/null | wc -l) -eq 1 ] || exit 0
+
+	# We found a software update image (which we shouldn't find, normally).
+	# Halt the watchdog while we attempt to find a matching public key for
+	# that image and we install it.
+	[ -e /dev/watchdog ] && echo -n "V" > /dev/watchdog
+
+	# Extract the code signing (public) keys from the MTAL
+	mkdir /tmp/mtal-keys
+	mtal-extractor /dev/ubi0_$(ubinfo /dev/ubi0 -N crypto | awk '/Volume ID/ {print $3}') /tmp/mtal-keys
+	mtal-extractor /dev/ubi0_$(ubinfo /dev/ubi0 -N prev_crypto | awk '/Volume ID/ {print $3}') /tmp/mtal-keys
+
+	source /opt/irobot/version.env
+	# Attempt to install the signed image, sequencing through each of the keys in /tmp/mtal-keys
+	for f in /tmp/mtal-keys/*; do
+		# Added $MODEL with $PRODUCT_VERSION for version comparision
+		swupdate -i /run/media/sda1/*.swu -R "$MODEL+$PRODUCT_VERSION" -k $f && /sbin/reboot
+	done
+	rm -rf /tmp/mtal-keys
+}
+
+case "$1" in
+start)
+	do_start
+	;;
+stop|restart|force-reload)
+	# Ignore silently
+	;;
+status)
+	echo "$DESC does not run as a service." >&2
+	exit 1
+	;;
+	
+*)
+	echo "Usage: $0 {start|stop|status|restart|try-restart|force-reload}" >&2
+	exit 3
+	;;
+esac
+

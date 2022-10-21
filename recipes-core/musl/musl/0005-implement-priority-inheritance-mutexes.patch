@@ -1,0 +1,243 @@
+From 4cd164954e7b7a61f2ddc043538e0ad7421240b4 Mon Sep 17 00:00:00 2001
+From: OpenEmbedded <oe.patch@oe>
+Date: Sun, 31 Mar 2019 22:03:14 +0000
+Subject: [PATCH] implement priority inheritance mutexes
+
+priority inheritance is a feature to mitigate priority inversion
+situations, where a execution of a medium-priority thread can
+unboundedly block forward progress of a high-priority thread when a
+lock it needs is held by a low-priority thread.
+
+the natural way to do priority inheritance would be with a simple
+futex flag to donate the calling thread's priority to a target thread
+while it waits on the futex. unfortunately, linux does not offer such
+an interface, but instead insists on implementing the whole locking
+protocol in kernelspace with special futex commands that exist solely
+for the purpose of doing PI mutexes. this would require the entire
+"trylock" logic to be duplicated in the timedlock code path for PI
+mutexes, since, once the previous lock holder releases the lock and
+the futex call returns, the lock is already held by the caller.
+obviously such code duplication is undesirable.
+
+instead, I've made the PI timedlock success path set the mutex lock
+count to -1, which can be thought of as "not yet complete", since a
+lock count of 0 is "locked, with no recursive references". a simple
+branch in a non-hot path of pthread_mutex_trylock can then see and act
+on this state, skipping past the code that would check and take the
+lock to the same code path that runs after the lock is obtained for a
+non-PI mutex.
+
+because we're forced to let the kernel perform the actual lock and
+unlock operations whenever the mutex is contended, we have to patch
+things up when it does the wrong thing:
+
+1. the lock operation is not aware of whether the mutex is
+   error-checking, so it will always fail with EDEADLK rather than
+   deadlocking.
+
+2. the lock operation is not aware of whether the mutex is robust, so
+   it will successfully obtain mutexes in the owner-died state even if
+   they're non-robust, whereas this operation should deadlock.
+
+3. the unlock operation always sets the lock value to zero, whereas
+   for robust mutexes, we want to set it to a special value indicating
+   that the mutex obtained after its owner died was unlocked without
+   marking it consistent, so that future operations all fail with
+   ENOTRECOVERABLE.
+
+the first of these is easy to solve, just by performing a futex wait
+on a dummy futex address to simulate deadlock or ETIMEDOUT as
+appropriate. but problems 2 and 3 interact in a nasty way. to solve
+problem 2, we need to back out the spurious success. but if waiters
+are present -- which we can't just ignore, because even if we don't
+want to wake them, the calling thread is incorrectly inheriting their
+priorities -- this requires using the kernel's unlock operation, which
+will zero the lock value, thereby losing the "owner died with lock
+held" state.
+
+to solve these problems, we overload the mutex's waiters field, which
+is unused for PI mutexes since they don't call the normal futex wait
+functions, as an indicator that the PI mutex is permanently
+non-lockable. originally I wanted to use the count field, but there is
+one code path that needs to access this flag without synchronization:
+trylock's CAS failure path needs to be able to decide whether to fail
+with EBUSY or ENOTRECOVERABLE, the waiters field is already treated as
+a relaxed-order atomic in our memory model, so this works out nicely.
+
+---
+ src/thread/pthread_mutex_timedlock.c       | 37 ++++++++++++++++++++++++++++++
+ src/thread/pthread_mutex_trylock.c         | 24 +++++++++++++++----
+ src/thread/pthread_mutex_unlock.c          | 14 +++++++++--
+ src/thread/pthread_mutexattr_setprotocol.c | 26 +++++++++++++++++++--
+ 4 files changed, 93 insertions(+), 8 deletions(-)
+
+diff --git a/src/thread/pthread_mutex_timedlock.c b/src/thread/pthread_mutex_timedlock.c
+index 0f171c0..6b89362 100644
+--- a/src/thread/pthread_mutex_timedlock.c
++++ b/src/thread/pthread_mutex_timedlock.c
+@@ -1,5 +1,40 @@
+ #include "pthread_impl.h"
+ 
++static int pthread_mutex_timedlock_pi(pthread_mutex_t *restrict m, const struct timespec *restrict at)
++{
++	int type = m->_m_type;
++	int priv = (type & 128) ^ 128;
++	pthread_t self = __pthread_self();
++	int e;
++
++	if (!priv) self->robust_list.pending = &m->_m_next;
++
++	do e = -__syscall(SYS_futex, &m->_m_lock, FUTEX_LOCK_PI|priv, 0, at);
++	while (e==EINTR);
++	if (e) self->robust_list.pending = 0;
++
++	switch (e) {
++	case 0:
++		/* Catch spurious success for non-robust mutexes. */
++		if (!(type&4) && ((m->_m_lock & 0x40000000) || m->_m_waiters)) {
++			a_store(&m->_m_waiters, -1);
++			__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv);
++			self->robust_list.pending = 0;
++			break;
++		}
++		/* Signal to trylock that we already have the lock. */
++		m->_m_count = -1;
++		return __pthread_mutex_trylock(m);
++	case ETIMEDOUT:
++		return e;
++	case EDEADLK:
++		if ((type&3) == PTHREAD_MUTEX_ERRORCHECK) return e;
++	}
++	do e = __timedwait(&(int){0}, 0, CLOCK_REALTIME, at, 1);
++	while (e != ETIMEDOUT);
++	return e;
++}
++
+ int __pthread_mutex_timedlock(pthread_mutex_t *restrict m, const struct timespec *restrict at)
+ {
+ 	if ((m->_m_type&15) == PTHREAD_MUTEX_NORMAL
+@@ -11,6 +46,8 @@ int __pthread_mutex_timedlock(pthread_mutex_t *restrict m, const struct timespec
+ 
+ 	r = __pthread_mutex_trylock(m);
+ 	if (r != EBUSY) return r;
++
++	if (type&8) return pthread_mutex_timedlock_pi(m, at);
+ 	
+ 	int spins = 100;
+ 	while (spins-- && m->_m_lock && !m->_m_waiters) a_spin();
+diff --git a/src/thread/pthread_mutex_trylock.c b/src/thread/pthread_mutex_trylock.c
+index 29622ff..a24e7c5 100644
+--- a/src/thread/pthread_mutex_trylock.c
++++ b/src/thread/pthread_mutex_trylock.c
+@@ -9,10 +9,17 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
+ 
+ 	old = m->_m_lock;
+ 	own = old & 0x3fffffff;
+-	if (own == tid && (type&3) == PTHREAD_MUTEX_RECURSIVE) {
+-		if ((unsigned)m->_m_count >= INT_MAX) return EAGAIN;
+-		m->_m_count++;
+-		return 0;
++	if (own == tid) {
++		if ((type&8) && m->_m_count<0) {
++			old &= 0x40000000;
++			m->_m_count = 0;
++			goto success;
++		}
++		if ((type&3) == PTHREAD_MUTEX_RECURSIVE) {
++			if ((unsigned)m->_m_count >= INT_MAX) return EAGAIN;
++			m->_m_count++;
++			return 0;
++		}
+ 	}
+ 	if (own == 0x3fffffff) return ENOTRECOVERABLE;
+ 	if (own || (old && !(type & 4))) return EBUSY;
+@@ -29,9 +36,18 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
+ 
+ 	if (a_cas(&m->_m_lock, old, tid) != old) {
+ 		self->robust_list.pending = 0;
++		if ((type&12)==12 && m->_m_waiters) return ENOTRECOVERABLE;
+ 		return EBUSY;
+ 	}
+ 
++success:
++	if ((type&8) && m->_m_waiters) {
++		int priv = (type & 128) ^ 128;
++		__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv);
++		self->robust_list.pending = 0;
++		return (type&4) ? ENOTRECOVERABLE : EBUSY;
++	}
++
+ 	volatile void *next = self->robust_list.head;
+ 	m->_m_next = next;
+ 	m->_m_prev = &self->robust_list.head;
+diff --git a/src/thread/pthread_mutex_unlock.c b/src/thread/pthread_mutex_unlock.c
+index ea9f54d..b66423e 100644
+--- a/src/thread/pthread_mutex_unlock.c
++++ b/src/thread/pthread_mutex_unlock.c
+@@ -8,10 +8,11 @@ int __pthread_mutex_unlock(pthread_mutex_t *m)
+ 	int type = m->_m_type & 15;
+ 	int priv = (m->_m_type & 128) ^ 128;
+ 	int new = 0;
++	int old;
+ 
+ 	if (type != PTHREAD_MUTEX_NORMAL) {
+ 		self = __pthread_self();
+-		int old = m->_m_lock;
++		old = m->_m_lock;
+ 		int own = old & 0x3fffffff;
+ 		if (own != self->tid)
+ 			return EPERM;
+@@ -29,7 +30,16 @@ int __pthread_mutex_unlock(pthread_mutex_t *m)
+ 		if (next != &self->robust_list.head) *(volatile void *volatile *)
+ 			((char *)next - sizeof(void *)) = prev;
+ 	}
+-	cont = a_swap(&m->_m_lock, new);
++	if (type&8) {
++		if (old<0 || a_cas(&m->_m_lock, old, new)!=old) {
++			if (new) a_store(&m->_m_waiters, -1);
++			__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv);
++		}
++		cont = 0;
++		waiters = 0;
++	} else {
++		cont = a_swap(&m->_m_lock, new);
++	}
+ 	if (type != PTHREAD_MUTEX_NORMAL && !priv) {
+ 		self->robust_list.pending = 0;
+ 		__vm_unlock();
+diff --git a/src/thread/pthread_mutexattr_setprotocol.c b/src/thread/pthread_mutexattr_setprotocol.c
+index c92a31c..511cc32 100644
+--- a/src/thread/pthread_mutexattr_setprotocol.c
++++ b/src/thread/pthread_mutexattr_setprotocol.c
+@@ -1,7 +1,29 @@
+ #include "pthread_impl.h"
++#include "syscall.h"
++
++static pthread_once_t check_pi_once;
++static int check_pi_result;
++
++static void check_pi()
++{
++	volatile int lk = 0;
++	check_pi_result = -__syscall(SYS_futex, &lk, FUTEX_LOCK_PI, 0, 0);
++}
+ 
+ int pthread_mutexattr_setprotocol(pthread_mutexattr_t *a, int protocol)
+ {
+-	if (protocol) return ENOTSUP;
+-	return 0;
++	switch (protocol) {
++	case PTHREAD_PRIO_NONE:
++		a->__attr &= ~8;
++		return 0;
++	case PTHREAD_PRIO_INHERIT:
++		pthread_once(&check_pi_once, check_pi);
++		if (check_pi_result) return check_pi_result;
++		a->__attr |= 8;
++		return 0;
++	case PTHREAD_PRIO_PROTECT:
++		return ENOTSUP;
++	default:
++		return EINVAL;
++	}
+ }

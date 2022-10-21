@@ -1,0 +1,26 @@
+From f8123ad0653f1f72be21a9f5fe02cd4cc18dab15 Mon Sep 17 00:00:00 2001
+From: OpenEmbedded <oe.patch@oe>
+Date: Mon, 26 Aug 2019 17:05:12 +0000
+Subject: [PATCH] fix namespace violation in dependencies of mtx_lock commit
+ 2de29bc994029b903a366b8a4a9f8c3c3ee2be90 left behind one reference to
+ pthread_mutex_trylock. fixing this also improves code generation due to the
+ namespace-safe version being hidde. Diffstat (limited to
+ 'src/thread/pthread_mutex_timedlock.c')
+
+---
+ src/thread/pthread_mutex_timedlock.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/thread/pthread_mutex_timedlock.c b/src/thread/pthread_mutex_timedlock.c
+index b95af25..0f171c0 100644
+--- a/src/thread/pthread_mutex_timedlock.c
++++ b/src/thread/pthread_mutex_timedlock.c
+@@ -9,7 +9,7 @@ int __pthread_mutex_timedlock(pthread_mutex_t *restrict m, const struct timespec
+ 	int type = m->_m_type;
+ 	int r, t, priv = (type & 128) ^ 128;
+ 
+-	r = pthread_mutex_trylock(m);
++	r = __pthread_mutex_trylock(m);
+ 	if (r != EBUSY) return r;
+ 	
+ 	int spins = 100;

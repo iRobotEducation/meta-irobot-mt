@@ -1,0 +1,37 @@
+From 0267e183d50a48d771a9ed3a9001361d19204143 Mon Sep 17 00:00:00 2001
+From: Devang Panchal <dpanchal@irobot.com>
+Date: Tue, 13 Apr 2021 07:12:52 -0400
+Subject: [PATCH] swupdate: add sleep 1 sec to avoid probe error
+
+LINCON-533: firmware installation succeeded with errors on G0 Robot
+
+  - add 1 second of sleep to let settle down new created ubi volume before
+proceed furter. this is to avoid probe failure in ideal scenario. if probe
+fails than retry 5 times.
+
+---
+ handlers/ubivol_handler.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/handlers/ubivol_handler.c b/handlers/ubivol_handler.c
+index 90f3688..4928abd 100644
+--- a/handlers/ubivol_handler.c
++++ b/handlers/ubivol_handler.c
+@@ -80,8 +80,13 @@ static int update_volume(libubi_t libubi, struct img_type *img,
+ 		vol->dev_num,
+ 		vol->vol_id);
+ 
+-	int probe_retries = 5;
++	/* add sleep to avoid probe failures this is to let settle
++	 * down new created ubi volume before proceed further and probe
++	 * voulme successfully.
++	 */
++	sleep(1);
+ 
++	int probe_retries = 5;
+ 	while(probe_retries--) {
+ 
+ 		err = ubi_probe_node(libubi, node);
+-- 
+2.27.0
+

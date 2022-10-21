@@ -1,0 +1,51 @@
+From 6104dae9088da7ffd9346671be867a43a4b03295 Mon Sep 17 00:00:00 2001
+From: Szabolcs Nagy <nsz@port70.net>
+Date: Thu, 16 May 2019 17:15:33 +0000
+Subject: [PATCH] fix static tls offsets of shared libs on TLS_ABOVE_TP targets
+
+tls_offset should always point to the end of the allocated static tls
+area, but this was not handled correctly on "tls variant 1" targets
+in the dynamic linker:
+
+after application tls was allocated, tls_offset was aligned up,
+potentially wasting tls space. (alignment may be needed at the
+begining of the tls area, not at the end, but that will be fixed
+separately as it is unlikely to affect real binaries.)
+
+when static tls was allocated for a shared library, tls_offset was
+only updated with the size of the tls segment which does not include
+alignment gaps, which can easily happen if the tls size update for
+one library leaves tls_offset misaligned for the next one. this can
+cause oob access in __copy_tls or arbitrary breakage at tls access.
+(the issue was observed on aarch64 with rust binaries)
+---
+ ldso/dynlink.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/ldso/dynlink.c b/ldso/dynlink.c
+index ad0cdba2..967f1fd9 100644
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1127,7 +1127,7 @@ static struct dso *load_library(const char *name, struct dso *needed_by)
+ #ifdef TLS_ABOVE_TP
+ 		p->tls.offset = tls_offset + ( (tls_align-1) &
+ 			-(tls_offset + (uintptr_t)p->tls.image) );
+-		tls_offset += p->tls.size;
++		tls_offset = p->tls.offset + p->tls.size;
+ #else
+ 		tls_offset += p->tls.size + p->tls.align - 1;
+ 		tls_offset -= (tls_offset + (uintptr_t)p->tls.image)
+@@ -1797,9 +1797,7 @@ _Noreturn void __dls3(size_t *sp)
+ #ifdef TLS_ABOVE_TP
+ 		app.tls.offset = GAP_ABOVE_TP;
+ 		app.tls.offset += -GAP_ABOVE_TP & (app.tls.align-1);
+-		tls_offset = app.tls.offset + app.tls.size
+-			+ ( -((uintptr_t)app.tls.image + app.tls.size)
+-			& (app.tls.align-1) );
++		tls_offset = app.tls.offset + app.tls.size;
+ #else
+ 		tls_offset = app.tls.offset = app.tls.size
+ 			+ ( -((uintptr_t)app.tls.image + app.tls.size)
+-- 
+2.27.0
+

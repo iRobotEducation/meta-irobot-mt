@@ -1,0 +1,212 @@
+From 2b2c95499e2d41ff430fff7fcfeac2d6041e6cc2 Mon Sep 17 00:00:00 2001
+From: Patrick Doyle <pdoyle@irobot.com>
+Date: Wed, 8 Apr 2020 15:34:43 -0400
+Subject: [PATCH] Add support for --hash-optional command line option.
+
+In order to deploy software to development systems, it can be useful to
+deploy (older?) code that does not include the sha256 checksums you
+added to newer code images.  Teach swupdate to install images when the
+hash checks fail.
+
+Signed-off-by: Patrick Doyle <pdoyle@irobot.com>
+---
+ core/parser.c              | 39 ++++++++++++++++++++++++--------------
+ core/swupdate.c            | 16 +++++++++++++---
+ corelib/stream_interface.c |  2 +-
+ include/parsers.h          |  2 +-
+ 4 files changed, 40 insertions(+), 19 deletions(-)
+
+diff --git a/core/parser.c b/core/parser.c
+index cab818b..aadf6b7 100644
+--- a/core/parser.c
++++ b/core/parser.c
+@@ -44,14 +44,19 @@ static inline IMGTYPE get_entry_type(struct img_type *img)
+ 
+ 
+ #ifndef CONFIG_HASH_VERIFY
+-static int check_hash_absent(struct imglist *list)
++static int check_hash_absent(struct imglist *list, int hash_optional)
+ {
+ 	struct img_type *image;
+ 	LIST_FOREACH(image, list, next) {
+ 		if (strnlen((const char *)image->sha256, SHA256_HASH_LENGTH) > 0) {
+-			ERROR("hash verification not enabled but hash supplied for %s",
+-				  image->fname);
+-			return -EINVAL;
++			if (hash_optional) {
++				WARN("hash verification not enabled but hash supplied for %s",
++				     image->fname);
++			} else {
++				ERROR("hash verification not enabled but hash supplied for %s",
++				      image->fname);
++				return -EINVAL;
++			}
+ 		}
+ 	}
+ 	return 0;
+@@ -62,7 +67,7 @@ static int check_hash_absent(struct imglist *list)
+ /*
+  * Check that all images in a list have a valid hash
+  */
+-static int check_missing_hash(struct imglist *list)
++static int check_missing_hash(struct imglist *list, int hash_optional)
+ {
+ 	struct img_type *image;
+ 
+@@ -73,10 +78,16 @@ static int check_missing_hash(struct imglist *list)
+ 		 */
+ 		if ( (strcmp(image->type, "ubipartition")) &&
+ 				(!IsValidHash(image->sha256))) {
+-			ERROR("Hash not set for %s Type %s",
+-				image->fname,
+-				image->type);
+-			return -EINVAL;
++			if (hash_optional) {
++				WARN("Hash not set for %s Type %s",
++				     image->fname,
++				     image->type);
++			} else {
++				ERROR("Hash not set for %s Type %s",
++				      image->fname,
++				      image->type);
++				return -EINVAL;
++			}
+ 		}
+ 	}
+ 
+@@ -175,7 +186,7 @@ static void remove_installed_image_list(struct imglist *img_list,
+ 	}
+ }
+ 
+-int parse(struct swupdate_cfg *sw, const char *descfile, int signature_check_optional)
++int parse(struct swupdate_cfg *sw, const char *descfile, int signature_check_optional, int hash_optional)
+ {
+ 	int ret = -1;
+ 	parser_fn current;
+@@ -241,13 +252,13 @@ int parse(struct swupdate_cfg *sw, const char *descfile, int signature_check_opt
+ 	 * If the software must be verified, all images
+ 	 * must have a valid hash to be checked
+ 	 */
+-	if (check_missing_hash(&sw->images) ||
+-		check_missing_hash(&sw->scripts))
++	if (check_missing_hash(&sw->images, hash_optional) ||
++	    check_missing_hash(&sw->scripts, hash_optional))
+ 		ret = -EINVAL;
+ #else
+ #ifndef CONFIG_HASH_VERIFY
+-	if (check_hash_absent(&sw->images) ||
+-		check_hash_absent(&sw->scripts))
++	if (check_hash_absent(&sw->images, hash_optional) ||
++		check_hash_absent(&sw->scripts, hash_optional))
+ 		ret = -EINVAL;
+ #endif
+ #endif
+diff --git a/core/swupdate.c b/core/swupdate.c
+index 770f819..99959e1 100644
+--- a/core/swupdate.c
++++ b/core/swupdate.c
+@@ -86,6 +86,7 @@ static struct option long_options[] = {
+ 	{"cert-purpose", required_argument, NULL, '1'},
+ 	{"forced-signer-name", required_argument, NULL, '2'},
+ 	{"signature-check-optional", no_argument, NULL, '3'},
++	{"hash-optional", no_argument, NULL, '4'},
+ #endif
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 	{"key-aes", required_argument, NULL, 'K'},
+@@ -136,6 +137,7 @@ static void usage(char *programname)
+ 		"     --forced-signer-name <cn>  : set expected common name of signer certificate\n"
+ 		"     --ca-path                  : path to the Certificate Authority (PEM)\n"
+ 		"     --signature-check-optional : Install image even if signature check fails\n"
++		"     --hash-optional            : Install image even if sha256 hash values are missing\n"
+ #endif
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 		" -K, --key-aes <key file>       : the file contains the symmetric key to be used\n"
+@@ -290,7 +292,7 @@ static int searching_for_image(char *name)
+ 	return fd;
+ }
+ 
+-static int install_from_file(char *fname, int check, int signature_check_optional)
++static int install_from_file(char *fname, int check, int signature_check_optional, int hash_optional)
+ {
+ 	int fdsw;
+ 	off_t pos;
+@@ -327,7 +329,7 @@ static int install_from_file(char *fname, int check, int signature_check_optiona
+ 
+ 	char* swdescfilename = alloca(strlen(get_tmpdir())+strlen(SW_DESCRIPTION_FILENAME)+1);
+ 	sprintf(swdescfilename, "%s%s", get_tmpdir(), SW_DESCRIPTION_FILENAME);
+-	ret = parse(&swcfg, swdescfilename, signature_check_optional);
++	ret = parse(&swcfg, swdescfilename, signature_check_optional, hash_optional);
+ 	if (ret) {
+ 		ERROR("failed to parse " SW_DESCRIPTION_FILENAME "!");
+ 		exit(EXIT_FAILURE);
+@@ -581,6 +583,7 @@ int main(int argc, char **argv)
+ 	char main_options[256];
+ 	unsigned int public_key_mandatory = 0;
+ 	unsigned int signature_check_optional = 1;
++	unsigned int hash_optional = 1;
+ 	struct sigaction sa;
+ 	int result = EXIT_SUCCESS;
+ #ifdef CONFIG_SURICATTA
+@@ -623,10 +626,14 @@ int main(int argc, char **argv)
+ #ifdef CONFIG_HW_COMPATIBILITY
+ 	strcat(main_options, "H:");
+ #endif
++#ifndef CONFIG_HASH_VERIFY
++	hash_optional = 0;
++#endif
+ #ifdef CONFIG_SIGNED_IMAGES
+ 	strcat(main_options, "k:");
+ 	public_key_mandatory = 1;
+ 	signature_check_optional = 0;
++	hash_optional = 0;
+ #endif
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 	strcat(main_options, "K:");
+@@ -745,6 +752,9 @@ int main(int argc, char **argv)
+ 		case '3':
+ 			signature_check_optional = 1;
+ 			break;
++		case '4':
++			hash_optional = 1;
++			break;
+ #ifdef CONFIG_ENCRYPTED_IMAGES
+ 		case 'K':
+ 			strncpy(swcfg.globals.aeskeyfname,
+@@ -973,7 +983,7 @@ int main(int argc, char **argv)
+ 
+ 	if (opt_i) {
+ 
+-		result = install_from_file(fname, opt_c, signature_check_optional);
++		result = install_from_file(fname, opt_c, signature_check_optional, hash_optional);
+ 		switch (result) {
+ 		case EXIT_FAILURE:
+ 			bootloader_env_set(BOOTVAR_TRANSACTION, "failed");
+diff --git a/corelib/stream_interface.c b/corelib/stream_interface.c
+index 068fa37..062c3d1 100644
+--- a/corelib/stream_interface.c
++++ b/corelib/stream_interface.c
+@@ -153,7 +153,7 @@ static int extract_files(int fd, struct swupdate_cfg *software)
+ 				return -1;
+ #endif
+ 			snprintf(output_file, sizeof(output_file), "%s%s", TMPDIR, SW_DESCRIPTION_FILENAME);
+-			if (parse(software, output_file, 0)) {
++			if (parse(software, output_file, 0, 0)) {
+ 				ERROR("Compatible SW not found");
+ 				return -1;
+ 			}
+diff --git a/include/parsers.h b/include/parsers.h
+index 0e830ec..15c4102 100644
+--- a/include/parsers.h
++++ b/include/parsers.h
+@@ -18,7 +18,7 @@
+ 
+ typedef int (*parser_fn)(struct swupdate_cfg *swcfg, const char *filename);
+ 
+-int parse(struct swupdate_cfg *swcfg, const char *filename, int signature_check_optional);
++int parse(struct swupdate_cfg *swcfg, const char *filename, int signature_check_optional, int hash_optional);
+ int parse_cfg (struct swupdate_cfg *swcfg, const char *filename);
+ int parse_json(struct swupdate_cfg *swcfg, const char *filename);
+ int parse_external(struct swupdate_cfg *swcfg, const char *filename);
+-- 
+2.24.1
+

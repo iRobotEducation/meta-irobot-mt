@@ -1,0 +1,315 @@
+From 8c013ac7c370ef6c6b07b5cf4e689e2bdb2ab5c1 Mon Sep 17 00:00:00 2001
+From: Maria Rios-Martinez <mriosmartinez@irobot.com>
+Date: Tue, 9 Jun 2020 15:42:57 -0400
+Subject: [PATCH] Add support for --query=<attribute> command line option
+
+It might be useful for users to query attributes from
+the sw-description file without doing any validation
+necessary for install. The query is generic enough to
+allow inclusion of attributes in sw-description without
+having to modify the swcfg structure in swupdate.h.
+---
+ core/parser.c     | 44 +++++++++++++++++++++++++++++++++
+ core/swupdate.c   | 62 ++++++++++++++++++++++++++++++++++++++++++++++-
+ include/parsers.h |  4 +++
+ parser/parser.c   | 61 ++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 170 insertions(+), 1 deletion(-)
+
+diff --git a/core/parser.c b/core/parser.c
+index aadf6b7..8a27024 100644
+--- a/core/parser.c
++++ b/core/parser.c
+@@ -24,6 +24,11 @@ static parser_fn parsers[] = {
+ 	parse_external
+ };
+ 
++static attribute_parser_fn attribute_parsers[] = {
++	parse_cfg_get_attributes,
++	parse_json_get_attributes
++};
++
+ typedef enum {
+ 	IS_IMAGE_FILE,
+ 	IS_SCRIPT,
+@@ -186,6 +191,45 @@ static void remove_installed_image_list(struct imglist *img_list,
+ 	}
+ }
+ 
++int parse_attributes(struct swupdate_cfg *sw, const char *descfile, char *attributes,
++		     int signature_check_optional, int hash_optional)
++{
++	int ret = -1;
++	attribute_parser_fn current;
++#ifdef CONFIG_SIGNED_IMAGES
++	char *sigfile;
++
++	sigfile = malloc(strlen(descfile) + strlen(".sig") + 1);
++	if (!sigfile)
++		return -ENOMEM;
++	strcpy(sigfile, descfile);
++	strcat(sigfile, ".sig");
++
++	ret = swupdate_verify_file(sw->dgst, sigfile, descfile,
++				   sw->globals.forced_signer_name,
++				   signature_check_optional);
++	free(sigfile);
++
++	if (ret)
++		return ret;
++
++#endif
++	for (unsigned int i = 0; i < ARRAY_SIZE(attribute_parsers); i++) {
++		current = attribute_parsers[i];
++
++		ret = current(sw, descfile, attributes);
++
++		if (ret == 0)
++			break;
++	}
++
++	if (ret != 0) {
++		ERROR("no parser available to parse " SW_DESCRIPTION_FILENAME "!");
++	}
++	
++	return ret;
++}
++
+ int parse(struct swupdate_cfg *sw, const char *descfile, int signature_check_optional, int hash_optional)
+ {
+ 	int ret = -1;
+diff --git a/core/swupdate.c b/core/swupdate.c
+index 99959e1..69fbf7e 100644
+--- a/core/swupdate.c
++++ b/core/swupdate.c
+@@ -72,6 +72,7 @@ static struct option long_options[] = {
+ 	{"verbose", no_argument, NULL, 'v'},
+ 	{"version", no_argument, NULL, '0'},
+ 	{"image", required_argument, NULL, 'i'},
++	{"query", required_argument, NULL, 'Q'},
+ 	{"file", required_argument, NULL, 'f'},
+ 	{"loglevel", required_argument, NULL, 'l'},
+ 	{"syslog", no_argument, NULL, 'L' },
+@@ -128,6 +129,7 @@ static void usage(char *programname)
+ 		" -e, --select <software>,<mode> : Select software images set and source\n"
+ 		"                                  Ex.: stable,main\n"
+ 		" -i, --image <filename>         : Software to be installed\n"
++		"     --query=<attribute>        : query information from sw-description file\n"
+ 		" -l, --loglevel <level>         : logging level\n"
+ 		" -L, --syslog                   : enable syslog logger\n"
+ #ifdef CONFIG_SIGNED_IMAGES
+@@ -393,6 +395,51 @@ static int install_from_file(char *fname, int check, int signature_check_optiona
+ 	return EXIT_SUCCESS;
+ }
+ 
++static int get_sw_description_attribute(char *fname, char* attributes, int signature_check_optional, int hash_optional)
++{
++	int fdsw;
++	off_t pos;
++	int ret;
++
++	if (!strlen(fname)) {
++		ERROR("Image not found...please reboot");
++		exit(EXIT_FAILURE);
++	}
++
++	fdsw = open(fname, O_RDONLY);
++	if (fdsw < 0) {
++		fdsw = searching_for_image(fname);
++		if (fdsw < 0) {
++			ERROR("Image Software cannot be read...exiting !");
++			exit(EXIT_FAILURE);
++		}
++	}
++
++	pos = 0;
++	ret = extract_sw_description(fdsw, SW_DESCRIPTION_FILENAME, &pos, 0);
++#ifdef CONFIG_SIGNED_IMAGES
++	ret |= extract_sw_description(fdsw, SW_DESCRIPTION_FILENAME ".sig",
++		&pos, signature_check_optional);
++#endif
++	/*
++	 * Check if files could be extracted
++	 */
++	if (ret) {
++		ERROR("Failed to extract meta information");
++		exit(EXIT_FAILURE);
++	}
++
++	char* swdescfilename = alloca(strlen(get_tmpdir())+strlen(SW_DESCRIPTION_FILENAME)+1);
++	sprintf(swdescfilename, "%s%s", get_tmpdir(), SW_DESCRIPTION_FILENAME);
++	ret = parse_attributes(&swcfg, swdescfilename, attributes, signature_check_optional, hash_optional);
++	if (ret) {
++		ERROR("failed to parse " SW_DESCRIPTION_FILENAME "!");
++		exit(EXIT_FAILURE);
++	}
++
++	return EXIT_SUCCESS;
++}
++
+ static int parse_image_selector(const char *selector, struct swupdate_cfg *sw)
+ {
+ 	char *pos;
+@@ -579,8 +626,10 @@ int main(int argc, char **argv)
+ 	int opt_i = 0;
+ 	int opt_e = 0;
+ 	int opt_c = 0;
++	int opt_Q = 0;
+ 	char image_url[MAX_URL];
+ 	char main_options[256];
++	char attributes[256];
+ 	unsigned int public_key_mandatory = 0;
+ 	unsigned int signature_check_optional = 1;
+ 	unsigned int hash_optional = 1;
+@@ -815,6 +864,10 @@ int main(int argc, char **argv)
+ 			strncpy(swcfg.globals.postupdatecmd, optarg,
+ 				sizeof(swcfg.globals.postupdatecmd));
+ 			break;
++		case 'Q':
++			opt_Q = 1;
++			strncpy(attributes, optarg, sizeof(attributes));
++			break;
+ 		default:
+ 			usage(argv[0]);
+ 			exit(EXIT_FAILURE);
+@@ -953,6 +1006,7 @@ int main(int argc, char **argv)
+ 		printf("Running on %s Revision %s\n", swcfg.hw.boardname, swcfg.hw.revision);
+ 
+ 	print_registered_handlers();
++
+ 	if (swcfg.globals.syslog_enabled) {
+ 		if (syslog_init()) {
+ 			ERROR("failed to initialize syslog notifier");
+@@ -981,7 +1035,7 @@ int main(int argc, char **argv)
+ 		start_thread(progress_bar_thread, NULL);
+ 	}
+ 
+-	if (opt_i) {
++	if (opt_i && !opt_Q) {
+ 
+ 		result = install_from_file(fname, opt_c, signature_check_optional, hash_optional);
+ 		switch (result) {
+@@ -998,6 +1052,12 @@ int main(int argc, char **argv)
+ 		cleanup_files(&swcfg);
+ 	}
+ 
++	if (opt_Q) {
++		/* parse and print sw-description attribute-val pairs */
++		int result = get_sw_description_attribute(fname, attributes, 
++				signature_check_optional, hash_optional);
++	}
++
+ #ifdef CONFIG_SYSTEMD
+ 	if (sd_booted()) {
+ 		sd_notify(0, "READY=1");
+diff --git a/include/parsers.h b/include/parsers.h
+index 15c4102..2ee36f5 100644
+--- a/include/parsers.h
++++ b/include/parsers.h
+@@ -17,10 +17,14 @@
+ #endif
+ 
+ typedef int (*parser_fn)(struct swupdate_cfg *swcfg, const char *filename);
++typedef int (*attribute_parser_fn)(struct swupdate_cfg *swcfg, const char *filename, char *attributes);
+ 
+ int parse(struct swupdate_cfg *swcfg, const char *filename, int signature_check_optional, int hash_optional);
+ int parse_cfg (struct swupdate_cfg *swcfg, const char *filename);
+ int parse_json(struct swupdate_cfg *swcfg, const char *filename);
+ int parse_external(struct swupdate_cfg *swcfg, const char *filename);
++int parse_attributes(struct swupdate_cfg *sw, const char *descfile, char *attributes, int signature_check_optional, int hash_optional);
++int parse_cfg_get_attributes (struct swupdate_cfg *swcfg, const char *filename, char *attributes);
++int parse_json_get_attributes (struct swupdate_cfg *swcfg, const char *filename, char *attributes);
+ #endif
+ 
+diff --git a/parser/parser.c b/parser/parser.c
+index bc89b9d..70c0aaa 100644
+--- a/parser/parser.c
++++ b/parser/parser.c
+@@ -680,6 +680,46 @@ static int parser(parsertype p, void *cfg, struct swupdate_cfg *swcfg)
+ #endif
+ 
+ #ifdef CONFIG_LIBCONFIG
++int parse_cfg_get_attributes (struct swupdate_cfg *swcfg, const char *filename, char *attributes)
++{
++	config_t cfg;
++	parsertype p = LIBCFG_PARSER;
++
++	memset(&cfg, 0, sizeof(cfg));
++	config_init(&cfg);
++	
++	/* Read the file. If there is an error, report it and exit. */
++	if(config_read_file(&cfg, filename) != CONFIG_TRUE) {
++		printf("%s ", config_error_file(&cfg));
++		printf("%d ", config_error_line(&cfg));
++		printf("%s ", config_error_text(&cfg));
++
++		fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
++			config_error_line(&cfg), config_error_text(&cfg));
++		config_destroy(&cfg);
++		ERROR(" ..exiting");
++		return -1;
++	}
++
++	char value[SWUPDATE_GENERAL_STRING_SIZE];
++	char *attr = NULL;
++	char *save_ptr = NULL;
++	void *setting = NULL;
++		
++	attr = strtok_r(attributes, ",", &save_ptr);
++	do {
++		if (attr && 
++			((setting = find_node(p, &cfg, attr, swcfg)) != NULL)) {
++			GET_FIELD_STRING(p, setting, NULL, value);	
++			fprintf(stdout, "%s=%s\n", attr, value);
++		}
++	} while ((attr = strtok_r(NULL, ",", &save_ptr)) != NULL);
++
++	config_destroy(&cfg);
++
++	return 0;
++}
++
+ int parse_cfg (struct swupdate_cfg *swcfg, const char *filename)
+ {
+ 	config_t cfg;
+@@ -717,6 +757,13 @@ int parse_cfg (struct swupdate_cfg __attribute__ ((__unused__)) *swcfg,
+ {
+ 	return -1;
+ }
++
++int parse_cfg_get_attributes (struct swupdate_cfg __attribute__ ((__unused__)) *swcfg, 
++			       const char __attribute__ ((__unused__)) *filename, 
++			       char __attribute__ ((__unused__)) *attributes)
++{
++	return -1;
++}
+ #endif
+ 
+ #ifdef CONFIG_JSON
+@@ -769,10 +816,24 @@ int parse_json(struct swupdate_cfg *swcfg, const char *filename)
+ 
+ 	return ret;
+ }
++
++int parse_json_get_attributes (struct swupdate_cfg __attribute__ ((__unused__)) *swcfg, 
++			       const char __attribute__ ((__unused__)) *filename, 
++			       char __attribute__ ((__unused__)) *attributes)
++{
++	return -1;
++}
+ #else
+ int parse_json(struct swupdate_cfg __attribute__ ((__unused__)) *swcfg,
+ 		const char __attribute__ ((__unused__)) *filename)
+ {
+ 	return -1;
+ }
++
++int parse_json_get_attributes (struct swupdate_cfg __attribute__ ((__unused__)) *swcfg, 
++			       const char __attribute__ ((__unused__)) *filename, 
++			       char __attribute__ ((__unused__)) *attributes)
++{
++	return -1;
++}
+ #endif
+-- 
+2.24.1
+

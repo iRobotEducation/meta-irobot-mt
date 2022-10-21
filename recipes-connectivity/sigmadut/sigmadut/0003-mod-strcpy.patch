@@ -1,0 +1,15 @@
+diff -urN a/lib/wfa_cs.c b/lib/wfa_cs.c
+--- a/lib/wfa_cs.c	2019-10-04 14:54:54.111685324 -0400
++++ b/lib/wfa_cs.c	2019-10-04 14:56:36.670480243 -0400
+@@ -2300,8 +2300,8 @@
+     case IF_80211:
+         infoResp->status = STATUS_COMPLETE;
+         ifListResp->iftype = IF_80211;
+-        //strcpy(ifListResp->ifs[0], WFA_STAUT_IF);
+-        strcpy(ifListResp->ifs[0], gnetIf);
++        strcpy(ifListResp->ifs[0], WFA_STAUT_IF);
++        //strcpy(ifListResp->ifs[0], gnetIf);
+         strcpy(ifListResp->ifs[1], "NULL");
+         strcpy(ifListResp->ifs[2], "NULL");
+         break;
+Binary files a/lib/.wfa_cs.c.swp and b/lib/.wfa_cs.c.swp differ
